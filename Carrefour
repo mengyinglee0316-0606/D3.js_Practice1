@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>台中市 家樂福（含家樂福超市）地圖 - D3</title>
+  <style>
+    body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans TC", Arial, sans-serif; }
+    header { padding: 12px 16px; border-bottom: 1px solid #ddd; display:flex; gap:12px; align-items:center; flex-wrap:wrap;}
+    header h1 { font-size: 16px; margin: 0; font-weight: 650; }
+    header .meta { font-size: 12px; color:#555; }
+    #wrap { position: relative; }
+    svg { width: 100vw; height: calc(100vh - 52px); display:block; }
+    .county { fill: #f5f5f5; stroke: #666; stroke-width: 1; }
+    .store { fill: #d33; stroke: #fff; stroke-width: 1; opacity: 0.9; cursor: pointer; }
+    .store:hover { opacity: 1; }
+    .tooltip {
+      position: absolute;
+      pointer-events: none;
+      background: rgba(0,0,0,0.82);
+      color: #fff;
+      padding: 8px 10px;
+      border-radius: 8px;
+      font-size: 12px;
+      line-height: 1.35;
+      max-width: 320px;
+      box-shadow: 0 6px 18px rgba(0,0,0,0.25);
+      transform: translate(10px, 10px);
+      display: none;
+      z-index: 10;
+    }
+    .legend {
+      position: absolute; left: 12px; bottom: 12px;
+      background: rgba(255,255,255,0.92);
+      border: 1px solid #ddd;
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-size: 12px;
+      box-shadow: 0 6px 18px rgba(0,0,0,0.08);
+    }
+    .dot {
+      display:inline-block; width:10px; height:10px; border-radius:50%;
+      background:#d33; margin-right:8px; vertical-align:middle;
+      border:1px solid #fff;
+    }
+    .status { color:#444; }
+    .err { color:#b00020; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>台中市 家樂福（含家樂福超市）地圖</h1>
+  <div class="meta" id="meta">載入中…</div>
+</header>
+
+<div id="wrap">
+  <svg id="svg"></svg>
+  <div class="tooltip" id="tip"></div>
+  <div class="legend">
+    <div><span class="dot"></span><span>家樂福 / Carrefour（含 Market / 超市）</span></div>
+    <div class="status" id="status" style="margin-top:6px;">準備查詢…</div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+
+<script>
+(async function main() {
+  const width = window.innerWidth;
+  const height = window.innerHeight - 52;
+
+  const svg = d3.select("#svg")
+    .attr("viewBox", [0, 0, width, height])
+    .attr("preserveAspectRatio", "xMidYMid meet");
+
+  const tip = document.getElementById("tip");
+  const meta = document.getElementById("meta");
+  const statusEl = document.getElementById("status");
+
+  function setStatus(msg, isErr=false) {
+    statusEl.textContent = msg;
+    statusEl.className = isErr ? "status err" : "status";
+  }
+
+  // 1) 取台灣縣市 GeoJSON（g0v/twgeojson）
+  // 來源：https://github.com/g0v/twgeojson （此處用 jsDelivr 取 raw 檔）
+  const twCountiesUrl = "https://cdn.jsdelivr.net/gh/g0v/twgeojson@master/json/twCounty2010.geo.json";
+
+  setStatus("載入台中市邊界…");
+  const counties = await fetch(twCountiesUrl).then(r => {
+    if (!r.ok) throw new Error("GeoJSON 載入失敗：" + r.status);
+    return r.json();
+  });
+
+  // 台中市名稱在不同資料可能是「臺中市」或「台中市」，都兼容
+  const taichung = counties.features.find(f => {
+    const name =
+      (f.properties && (f.properties.name || f.properties.NAME || f.properties.COUNTYNAME)) || "";
+    return name.includes("臺中") || name.includes("台中");
+  });
+
+  if (!taichung) throw new Error("找不到台中市邊界（GeoJSON 內未命中）");
+
+  // 投影：用 fitSize 讓台中市剛好塞進畫面
+  const projection = d3.geoMercator().fitSize([width, height], taichung);
+  const path = d3.geoPath(projection);
+
+  svg.append("path")
+    .datum(taichung)
+    .attr("class", "county")
+    .attr("d", path);
+
+  // 2) 用 Overpass API 抓「台中市」內家樂福 / 家樂福超市
+  // Overpass QL：用 area 名稱鎖定臺中市，再用 name/brand/operator 模糊匹配
+  // 這裡同時涵蓋：Carrefour / 家樂福 / Carrefour Market / 家樂福超市
+  // 注意：OSM 標註品質不一，可能有漏抓/誤抓，可自行調整 filter
+  setStatus("查詢 OSM（Overpass）中的家樂福門市…");
+
+  const overpassEndpoint = "https://overpass-api.de/api/interpreter";
+  const query = `
+[out:json][timeout:35];
+area["boundary"="administrative"]["name"~"^(臺中市|台中市)$"]->.searchArea;
+(
+  nwr(area.searchArea)
+    ["name"~"(家樂福|Carrefour)","i"];
+  nwr(area.searchArea)
+    ["brand"~"(Carrefour|家樂福)","i"];
+  nwr(area.searchArea)
+    ["operator"~"(Carrefour|家樂福)","i"];
+);
+out center tags;
+  `.trim();
+
+  const overpassUrl = overpassEndpoint + "?data=" + encodeURIComponent(query);
+
+  const overpassJson = await fetch(overpassUrl).then(r => {
+    if (!r.ok) throw new Error("Overpass 查詢失敗：" + r.status);
+    return r.json();
+  });
+
+  const elements = overpassJson.elements || [];
+
+  // 轉成點位（node: lat/lon, way/relation: center.lat/center.lon）
+  const points = elements.map(el => {
+    const lat = el.lat ?? el.center?.lat;
+    const lon = el.lon ?? el.center?.lon;
+    if (typeof lat !== "number" || typeof lon !== "number") return null;
+
+    const t = el.tags || {};
+    const name = t.name || t["name:zh"] || t["name:zh-Hant"] || t["name:en"] || "(未命名)";
+    const brand = t.brand || t.operator || "";
+    const addr = [
+      t["addr:full"] || "",
+      t["addr:city"] || "",
+      t["addr:district"] || "",
+      t["addr:street"] || "",
+      t["addr:housenumber"] || ""
+    ].filter(Boolean).join("");
+
+    const type = t.shop || t.amenity || t.building || "";
+    return { id: el.type + "/" + el.id, lat, lon, name, brand, addr, type, raw: t };
+  }).filter(Boolean);
+
+  meta.textContent = `OSM/Overpass 取得 ${points.length} 筆（可能因 OSM 標註而有漏/誤差）`;
+  setStatus(`完成：共 ${points.length} 筆門市`);
+
+  // 3) 繪製點
+  const g = svg.append("g");
+
+  g.selectAll("circle")
+    .data(points)
+    .join("circle")
+    .attr("class", "store")
+    .attr("r", 4.5)
+    .attr("cx", d => projection([d.lon, d.lat])[0])
+    .attr("cy", d => projection([d.lon, d.lat])[1])
+    .on("mousemove", (event, d) => {
+      const html = `
+        <div style="font-weight:650; margin-bottom:2px;">${escapeHtml(d.name)}</div>
+        ${d.brand ? `<div>品牌/營運：${escapeHtml(d.brand)}</div>` : ""}
+        ${d.type ? `<div>類型：${escapeHtml(d.type)}</div>` : ""}
+        ${d.addr ? `<div>地址：${escapeHtml(d.addr)}</div>` : ""}
+        <div style="opacity:.85; margin-top:4px;">(${d.lat.toFixed(6)}, ${d.lon.toFixed(6)})</div>
+      `;
+      tip.innerHTML = html;
+      tip.style.left = event.pageX + "px";
+      tip.style.top = event.pageY + "px";
+      tip.style.display = "block";
+    })
+    .on("mouseleave", () => {
+      tip.style.display = "none";
+    });
+
+  // 簡單 HTML escape
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => (
+      { "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#039;" }[c]
+    ));
+  }
+
+  // 4) 視窗尺寸變更：重新整理（簡化處理）
+  window.addEventListener("resize", () => location.reload());
+
+})().catch(err => {
+  document.getElementById("meta").textContent = "載入失敗";
+  const statusEl = document.getElementById("status");
+  statusEl.textContent = err.message || String(err);
+  statusEl.className = "status err";
+  console.error(err);
+});
+</script>
+</body>
+</html>
+
