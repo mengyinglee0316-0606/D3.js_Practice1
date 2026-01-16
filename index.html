@@ -137,6 +137,7 @@ out center tags;
 
   async function fetchOverpass(endpoints, payload) {
     let lastError;
+    const bodyParams = new URLSearchParams({ data: payload });
     for (const endpoint of endpoints) {
       try {
         const response = await fetch(endpoint, {
@@ -144,7 +145,7 @@ out center tags;
           headers: {
             "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"
           },
-          body: "data=" + encodeURIComponent(payload)
+          body: bodyParams
         });
 
         const contentType = response.headers.get("content-type") || "";
@@ -160,6 +161,21 @@ out center tags;
       } catch (err) {
         lastError = err;
         console.warn("Overpass endpoint failed:", endpoint, err);
+      }
+
+      try {
+        const overpassUrl = endpoint + "?data=" + encodeURIComponent(payload);
+        const proxyUrl = "https://api.allorigins.win/raw?url=" + encodeURIComponent(overpassUrl);
+        const proxyResponse = await fetch(proxyUrl);
+        if (!proxyResponse.ok) {
+          const errorText = await proxyResponse.text();
+          throw new Error(`Overpass 代理查詢失敗：${proxyResponse.status} ${errorText}`.trim());
+        }
+        const rawText = await proxyResponse.text();
+        return JSON.parse(rawText);
+      } catch (err) {
+        lastError = err;
+        console.warn("Overpass proxy failed:", endpoint, err);
       }
     }
     throw lastError || new Error("Overpass 查詢失敗：未知錯誤");
