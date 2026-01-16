@@ -116,7 +116,11 @@
   // 注意：OSM 標註品質不一，可能有漏抓/誤抓，可自行調整 filter
   setStatus("查詢 OSM（Overpass）中的家樂福門市…");
 
-  const overpassEndpoint = "https://overpass-api.de/api/interpreter";
+  const overpassEndpoints = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.nchc.org.tw/api/interpreter"
+  ];
   const query = `
 [out:json][timeout:35];
 area["boundary"="administrative"]["name"~"^(臺中市|台中市)$"]->.searchArea;
@@ -131,12 +135,53 @@ area["boundary"="administrative"]["name"~"^(臺中市|台中市)$"]->.searchArea
 out center tags;
   `.trim();
 
-  const overpassUrl = overpassEndpoint + "?data=" + encodeURIComponent(query);
+  async function fetchOverpass(endpoints, payload) {
+    let lastError;
+    const bodyParams = new URLSearchParams({ data: payload });
+    for (const endpoint of endpoints) {
+      try {
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"
+          },
+          body: bodyParams
+        });
 
-  const overpassJson = await fetch(overpassUrl).then(r => {
-    if (!r.ok) throw new Error("Overpass 查詢失敗：" + r.status);
-    return r.json();
-  });
+        const contentType = response.headers.get("content-type") || "";
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(`Overpass 查詢失敗：${response.status} ${errorText}`.trim());
+        }
+        if (!contentType.includes("application/json")) {
+          const errorText = await response.text();
+          throw new Error(`Overpass 回傳非 JSON：${errorText}`.trim());
+        }
+        return response.json();
+      } catch (err) {
+        lastError = err;
+        console.warn("Overpass endpoint failed:", endpoint, err);
+      }
+
+      try {
+        const overpassUrl = endpoint + "?data=" + encodeURIComponent(payload);
+        const proxyUrl = "https://api.allorigins.win/raw?url=" + encodeURIComponent(overpassUrl);
+        const proxyResponse = await fetch(proxyUrl);
+        if (!proxyResponse.ok) {
+          const errorText = await proxyResponse.text();
+          throw new Error(`Overpass 代理查詢失敗：${proxyResponse.status} ${errorText}`.trim());
+        }
+        const rawText = await proxyResponse.text();
+        return JSON.parse(rawText);
+      } catch (err) {
+        lastError = err;
+        console.warn("Overpass proxy failed:", endpoint, err);
+      }
+    }
+    throw lastError || new Error("Overpass 查詢失敗：未知錯誤");
+  }
+
+  const overpassJson = await fetchOverpass(overpassEndpoints, query);
 
   const elements = overpassJson.elements || [];
 
@@ -211,4 +256,3 @@ out center tags;
 </script>
 </body>
 </html>
-
