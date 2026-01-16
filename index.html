@@ -131,12 +131,20 @@ area["boundary"="administrative"]["name"~"^(臺中市|台中市)$"]->.searchArea
 out center tags;
   `.trim();
 
-  const overpassUrl = overpassEndpoint + "?data=" + encodeURIComponent(query);
-
-  const overpassJson = await fetch(overpassUrl).then(r => {
-    if (!r.ok) throw new Error("Overpass 查詢失敗：" + r.status);
-    return r.json();
+  const overpassResponse = await fetch(overpassEndpoint, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"
+    },
+    body: "data=" + encodeURIComponent(query)
   });
+
+  if (!overpassResponse.ok) {
+    const errorText = await overpassResponse.text();
+    throw new Error(`Overpass 查詢失敗：${overpassResponse.status} ${errorText}`.trim());
+  }
+
+  const overpassJson = await overpassResponse.json();
 
   const elements = overpassJson.elements || [];
 
@@ -211,4 +219,3 @@ out center tags;
 </script>
 </body>
 </html>
-
